@@ -869,7 +869,71 @@ BenchmarkGood-4  500000000   3.25 ns/op
 </td></tr>
 </tbody></table>
 
+## Prefer Specifying Map Capacity Hints
+スライスやmapの容量のヒントが事前にある場合は初期化時に次のように設定しましょう。
+
+```go
+make(map[T1]T2, hint)
+```
+
+`make()` の引数にキャパシティを渡すと、初期化時に適切なサイズにしようとします。
+なので要素をマップに追加する際にアロケーションの回数を減らすことができます。
+ただし、キャパシティのヒントは必ずしも保証されるものではありません。
+もし事前にキャパシティを渡していても、要素の追加時にアロケーションが発生する場合もあります。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+m := make(map[string]os.FileInfo)
+files, _ := ioutil.ReadDir("./files")
+for _, f := range files {
+    m[f.Name()] = f
+}
+```
+
+</td><td>
+
+```go
+files, _ := ioutil.ReadDir("./files")
+m := make(map[string]os.FileInfo, len(files))
+for _, f := range files {
+    m[f.Name()] = f
+}
+```
+
+</td></tr>
+<tr><td>
+
+`m` は初期化時にサイズのヒントが与えられませんでした。
+そのため余計にアロケーションが発生する可能性があります。
+
+</td><td>
+
+`m` にはサイズのヒントが与えられています。
+要素の追加時にアロケーションの回数を押さえられます。
+
+</td></tr>
+</tbody></table>
+
 # Style
+
+## Be Consistent
+このガイドラインの一部は客観的に評価することができます。
+ですが状況や文脈に依存する主観的なものもあります。
+
+ですが何よりも重要なことは一貫性を保つことです。
+
+一貫性のあるコードは保守しやすく、説明しやすく、読むときのオーバーヘッドも減らせます。
+更に新しい規則やバグへの修正が非常に簡単になります。
+
+逆に、1つのコードベース内に複数の異なったりバッティングしているスタイルがあると、メンテナンスのオーバーヘッドや、不確実なコード、認知的不協和が発生します。
+これらの全てが開発速度の低下、苦痛なコードレビューを誘発し、更にバグを発生させます。
+
+このガイドラインにある項目を自分たちのコードに適用する場合、パッケージもしくは更に大きな単位で適用することを勧めます。
+サブパッケージレベルで適用することは同じコードベースに複数のスタイルを当てはめることになるため、先程述べた悪いパターンに当てはまっています。
 
 ## Group Similar Declarations
 Go は似たような宣言をグループにまとめることができます。
@@ -1349,7 +1413,7 @@ type Client struct {
 </td></tr>
 </tbody></table>
 
-## Use Field Names to initialize Structs
+## Use Field Names to Initialize Structs
 
 構造体を初期化する際にはフィールド名を書くようにしましょう。
 [`go vet`]( https://golang.org/cmd/vet/ )でこのルールは指摘されます。
@@ -1690,6 +1754,79 @@ sptr := &T{Name: "bar"}
 
 </td></tr>
 </tbody></table>
+
+## Initializing Maps
+空のマップを作る場合は `make(...)` を使い、コード内で実際にデータを入れます。
+こうすることで、変数宣言と視覚的に区別でき、後でサイズヒントをつけやすくなります。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+var (
+  // m1 is safe to read and write;
+  // m2 will panic on writes.
+  m1 = map[T1]T2{}
+  m2 map[T1]T2
+)
+```
+
+</td><td>
+
+```go
+var (
+  // m1 is safe to read and write;
+  // m2 will panic on writes.
+  m1 = make(map[T1]T2)
+  m2 map[T1]T2
+)
+```
+
+</td></tr>
+<tr><td>
+
+変数宣言と初期化が視覚的に似ている
+
+</td><td>
+
+変数宣言と初期化が視覚的に区別しやすい
+
+</td></tr>
+</tbody></table>
+
+可能なら `make()` でマップを初期化する際にキャパシティのヒントを渡しましょう。
+詳細は[Prefer Specifying Map Capacity Hints]( #prefer-specifying-map-capacity-hints )を参照してください。
+
+一方で、マップが予め決まった要素だけを保つ場合にはリテラルを使って初期化するほうがよいでしょう。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+m := make(map[T1]T2, 3)
+m[k1] = v1
+m[k2] = v2
+m[k3] = v3
+```
+
+</td><td>
+
+```go
+m := map[T1]T2{
+  k1: v1,
+  k2: v2,
+  k3: v3,
+}
+```
+
+</td></tr>
+</tbody></table>
+
+大まかな原則は初期化時に決まった要素を追加するならマップリテラルを使い、それ以外なら `make()` (とあるならキャパシティのヒント)を使いましょう。
 
 ## Format Strings outside Printf
 フォーマット用の文字列を`Printf`スタイルの外で定義する場合は`const`を使いましょう。
