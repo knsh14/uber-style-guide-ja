@@ -36,6 +36,75 @@ https://github.com/golang/go/wiki/IDEsAndTextEditorPlugins
 
 もしインタフェースのメソッドがそのインタフェースを満たした型のデータをいじりたいなら、インタフェースの裏側の型はポインタである必要があります。
 
+## Verify Interface Compliance
+コンパイル時にインタフェースが適切に実装されているかチェックしましょう。
+これは以下のことを指します。
+
+* 公開された型がAPIとして適切に要求されたインタフェースを実装しているか
+* 公開されてるかどうかに関わらず、ある型の集合が同じインタフェースを実装しているか
+* その他にインタフェースを実装しなければ利用できなくなるケース
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+type Handler struct {
+  // ...
+}
+
+
+
+func (h *Handler) ServeHTTP(
+  w http.ResponseWriter,
+  r *http.Request,
+) {
+  ...
+}
+```
+
+</td><td>
+
+```go
+type Handler struct {
+  // ...
+}
+
+var _ http.Handler = (*Handler)(nil)
+
+func (h *Handler) ServeHTTP(
+  w http.ResponseWriter,
+  r *http.Request,
+) {
+  // ...
+}
+```
+
+</td></tr>
+</tbody></table>
+
+`var _ http.Handler = (*Handler)(nil)` という式は `*Handler` 型が `http.Handler` インタフェースを実装していなければ、コンパイルエラーになります。
+
+代入式の右辺はゼロ値にするべきです。
+ポインタ型やスライス、マップなどは `nil` ですし、構造体ならその型の空の構造体にします。
+
+```go
+type LogHandler struct {
+  h   http.Handler
+  log *zap.Logger
+}
+
+var _ http.Handler = LogHandler{}
+
+func (h LogHandler) ServeHTTP(
+  w http.ResponseWriter,
+  r *http.Request,
+) {
+  // ...
+}
+```
+
 ## Receivers and Interfaces
 レシーバーが値のメソッドはレシーバーがポインタでも呼び出すことができますが、逆はできません。
 
@@ -411,6 +480,130 @@ const (
 // LogToStdout=0, LogToFile=1, LogToRemote=2
 ```
 
+## Use `"time"` to handle time
+時間を正しく扱うのは非常に困難です。
+時間に対する誤解には次のようなものがあります。
+
+1. 1日は24時間である
+2. 1時間は60分である
+3. 1周間は7日である
+4. 1年は365日である
+5. [などなど]( https://infiniteundo.com/post/25326999628/falsehoods-programmers-believe-about-time )
+
+例えば、1番について考えると、単純に24時間を足すだけでは正しくカレンダー上次の日になるとは限りません。
+
+そのため、時間を扱う場合は常に[time]( https://pkg.go.dev/time?tab=doc )パッケージを使いましょう。
+なぜならこのパッケージで前述の誤解を安全に処理することができるからです。
+
+### Use `time.Time` for instants of time
+時刻を扱うときは[time.Time]( https://pkg.go.dev/time?tab=doc#Time )型を使いましょう。
+また、時刻を比較したり、足し引きする際にも[time.Time]( https://pkg.go.dev/time?tab=doc#Time )型のメソッドを使いましょう
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+func isActive(now, start, stop int) bool {
+  return start <= now && now < stop
+}
+```
+
+</td><td>
+
+```go
+func isActive(now, start, stop time.Time) bool {
+  return (start.Before(now) || start.Equal(now)) && now.Before(stop)
+}
+```
+
+</td></tr>
+</tbody></table>
+
+### Use `time.Duration` for periods of time
+期間を扱うときには[time.Duration]( https://pkg.go.dev/time?tab=doc#Duration )型を使いましょう。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+func poll(delay int) {
+  for {
+    // ...
+    time.Sleep(time.Duration(delay) * time.Millisecond)
+  }
+}
+
+poll(10) // was it seconds or milliseconds?
+```
+
+</td><td>
+
+```go
+func poll(delay time.Duration) {
+  for {
+    // ...
+    time.Sleep(delay)
+  }
+}
+
+poll(10*time.Second)
+```
+
+</td></tr>
+</tbody></table>
+
+時刻に24時間を足す例に戻ります。
+もしカレンダー上で次の日の同じ時刻にしたい場合は [`time.AddDate`]( https://pkg.go.dev/time?tab=doc#Time.AddDate )メソッドを使います。
+もしその時刻から正確に24時間後にしたい場合は[`time.Add`]( https://pkg.go.dev/time?tab=doc#Time.Add )メソッドを使います。
+
+```go
+newDay := t.AddDate(0 /* years */, 0, /* months */, 1 /* days */)
+maybeNewDay := t.Add(24 * time.Hour)
+```
+
+### Use `time.Time` and `time.Duration` with external systems
+
+できるなら外部システムとのやり取りにも `time.Time` 型や `time.Duration` 型を使うようにしましょう。
+
+* Command-line flags: [`flag`]( https://golang.org/pkg/flag/ ) パッケージは[`time.ParseDuration`]( https://golang.org/pkg/time/#ParseDuration )を使うことで `time.Duration` 型をサポートできます
+* JSON: [`encoding/json`]( https://golang.org/pkg/encoding/json/ )パッケージは[`Unmarshal` メソッド]( https://golang.org/pkg/time/#Time.UnmarshalJSON )によって[RFC 3339]( https://tools.ietf.org/html/rfc3339 )フォーマットの時刻を `time.Time` 型にエンコーディングできます
+* SQL: [`database/sql`]( https://golang.org/pkg/database/sql/ )パッケージではもしドライバーがサポートしていれば `DATETIME` や `TIMESTAMP` 型のカラムを `time.Time` 型にすることができます
+* YAML: [`gopkg.in/yaml.v2`]( https://godoc.org/gopkg.in/yaml.v2 )パッケージは[`time.ParseDuration`]( https://golang.org/pkg/time/#ParseDuration )によって[RFC 3339]( https://tools.ietf.org/html/rfc3339 )フォーマットの時刻を `time.Time` 型にエンコーディングできます
+
+もし `time.Duration` が使えないなら、`int` 型や `float64` 型を使ってフィールド名に単位をもたせるようにしましょう。
+次の表のようにします。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+// {"interval": 2}
+type Config struct {
+  Interval int `json:"interval"`
+}
+```
+
+</td><td>
+
+```go
+// {"intervalMillis": 2000}
+type Config struct {
+  IntervalMillis int `json:"intervalMillis"`
+}
+```
+
+</td></tr>
+</tbody></table>
+
+もしこれらのインタラクションで `time.Time` を使えない場合には、[RFC 3339]( https://tools.ietf.org/html/rfc3339 )フォーマットの `string` 型を使うようにしましょう。
+このフォーマットは[time.UnmarshalText]( https://golang.org/pkg/time/#Time.UnmarshalText )メソッドの中でも使われますし、`time.Parse` や `time.Format` 関数でも [`time.RFC3339`]( https://pkg.go.dev/time?tab=doc#RFC3339 )と組み合わせて使えます。
+
 ## Error Types
 エラーを定義する方法には様々な種類があります。
 
@@ -492,7 +685,7 @@ func open(file string) error {
 }
 
 func use() {
-  if err := open(); err != nil {
+  if err := open("testfile.txt"); err != nil {
     if strings.Contains(err.Error(), "not found") {
       // handle
     } else {
@@ -518,7 +711,7 @@ func open(file string) error {
 }
 
 func use() {
-  if err := open(); err != nil {
+  if err := open("testfile.txt"); err != nil {
     if _, ok := err.(errNotFound); ok {
       // handle
     } else {
@@ -732,7 +925,7 @@ if err != nil {
 </td></tr>
 </tbody></table>
 
-## Use go.uber.org/atomic 
+## Use go.uber.org/atomic
 **TODO: もう少し噛み砕く**
 
 `int32`や`int64`などの変数に対してアトミックな操作をするために[sync/atomic]( https://golang.org/pkg/sync/atomic/ )パッケージが使われます。
@@ -787,6 +980,204 @@ func (f *foo) isRunning() bool {
 
 </td></tr>
 </tbody></table>
+
+## Avoid Mutable Globals
+グローバル変数を変更するのは避けましょう。
+代わりに依存関係の注入を使って構造体に持たせるようにしましょう。
+関数ポインタを他の値と同じように構造体にもたせます。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+// sign.go
+
+var _timeNow = time.Now
+
+func sign(msg string) string {
+  now := _timeNow()
+  return signWithTime(msg, now)
+}
+```
+
+</td><td>
+
+```go
+// sign.go
+
+type signer struct {
+  now func() time.Time
+}
+
+func newSigner() *signer {
+  return &signer{
+    now: time.Now,
+  }
+}
+
+func (s *signer) Sign(msg string) string {
+  now := s.now()
+  return signWithTime(msg, now)
+}
+```
+</td></tr>
+<tr><td>
+```go
+// sign_test.go
+
+func TestSign(t *testing.T) {
+  oldTimeNow := _timeNow
+  _timeNow = func() time.Time {
+    return someFixedTime
+  }
+  defer func() { _timeNow = oldTimeNow }()
+
+  assert.Equal(t, want, sign(give))
+}
+```
+
+</td><td>
+
+```go
+// sign_test.go
+
+func TestSigner(t *testing.T) {
+  s := newSigner()
+  s.now = func() time.Time {
+    return someFixedTime
+  }
+
+  assert.Equal(t, want, s.Sign(give))
+}
+```
+
+</td></tr>
+</tbody></table>
+
+
+## Avoid Embedding Types in Public Structs
+型の埋め込みは実装の詳細を漏らし、型のブラッシュアップを阻害し、ドキュメントが曖昧になってしまいます。
+
+共通の `AbstractList` を使って様々なリスト型を実装すると仮定します。
+この場合に `AbstractList` を埋め込むことでリスト操作を実装するのはやめましょう。
+代わりにメソッドを再度定義してその中で `AbstractList` のメソッドを実装するようにしましょう。
+
+```go
+type AbstractList struct {}
+
+// Add adds an entity to the list.
+func (l *AbstractList) Add(e Entity) {
+  // ...
+}
+
+// Remove removes an entity from the list.
+func (l *AbstractList) Remove(e Entity) {
+  // ...
+}
+```
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+// ConcreteList is a list of entities.
+type ConcreteList struct {
+  *AbstractList
+}
+```
+
+</td><td>
+
+```go
+// ConcreteList is a list of entities.
+type ConcreteList struct {
+  list *AbstractList
+}
+
+// Add adds an entity to the list.
+func (l *ConcreteList) Add(e Entity) {
+  return l.list.Add(e)
+}
+
+// Remove removes an entity from the list.
+func (l *ConcreteList) Remove(e Entity) {
+  return l.list.Remove(e)
+}
+```
+
+</td></tr>
+</tbody></table>
+
+Go では継承が無い代わりに[埋め込み]( https://golang.org/doc/effective_go.html#embedding )を使えます。
+外部の型は暗黙的に埋め込まれた型のメソッドを実装しています。
+これらのメソッドはデフォルトでは埋め込まれた型のインスタンスのメソッドになります。
+
+構造体は埋め込んだ型と同じ名前のフィールドを作成します。
+なので埋め込んだ型が公開されていたら、そのフィールドも公開されます。
+後方互換性を保つために、外側の型は埋め込んだ型を保持する必要があります。
+
+埋め込みが必要な場面は殆どありません。
+多くは面倒なメソッドの移譲を書かずに済ませるために使われます。
+
+構造体の代わりに AbstractList インタフェースを埋め込むこともできます。
+これだと開発者に将来的な自由度をもたせることができます。
+しかし、抽象的な実装に依存して実装の詳細が漏れるという問題は解決されません。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+// AbstractList is a generalized implementation
+// for various kinds of lists of entities.
+type AbstractList interface {
+  Add(Entity)
+  Remove(Entity)
+}
+
+// ConcreteList is a list of entities.
+type ConcreteList struct {
+  AbstractList
+}
+```
+
+</td><td>
+
+```go
+// ConcreteList is a list of entities.
+type ConcreteList struct {
+  list *AbstractList
+}
+
+// Add adds an entity to the list.
+func (l *ConcreteList) Add(e Entity) {
+  return l.list.Add(e)
+}
+
+// Remove removes an entity from the list.
+func (l *ConcreteList) Remove(e Entity) {
+  return l.list.Remove(e)
+}
+```
+
+</td></tr>
+</tbody></table>
+
+構造体の埋め込みでもインタフェースの埋め込みでも、将来的な型の変更に制限がかかります。
+
+* 埋め込まれたインタフェースにメソッドを追加することは破壊的変更になります
+* 埋め込まれた構造体からメソッドを削除すると破壊的変更になります
+* 埋め込まれた型を削除することは破壊的変更になります
+* 埋め込まれた型を同じインタフェースを実装した別の型に差し替える場合も破壊的変更になります
+
+埋め込みの代わりに同じメソッドを書くのは面倒ですが、その分実装の詳細を外側から隠すことができます。
+実装の詳細をそのメソッドが持つことで内部での変更がしやすくなります。
+実装がすぐに見えるので、Listの詳細をさらに見に行く必要がなくなります。
+
 
 # Performance
 パフォーマンスガイドラインは特によく実行される箇所にのみ適用されます。
@@ -1979,62 +2370,114 @@ Functional Option パターンは不透明なOption型を使って内部の構�
 ```go
 // package db
 
-func Connect(
+func Open(
   addr string,
-  timeout time.Duration,
-  caching bool,
+  cache bool,
+  logger *zap.Logger
 ) (*Connection, error) {
   // ...
 }
-
-// Timeout and caching must always be provided,
-// even if the user wants to use the default.
-
-db.Connect(addr, db.DefaultTimeout, db.DefaultCaching)
-db.Connect(addr, newTimeout, db.DefaultCaching)
-db.Connect(addr, db.DefaultTimeout, false /* caching */)
-db.Connect(addr, newTimeout, false /* caching */)
 ```
 
 </td><td>
 
 ```go
-type options struct {
-  timeout time.Duration
-  caching bool
+// package db
+
+type Option interface {
+  // ...
 }
 
-// Option overrides behavior of Connect.
+func WithCache(c bool) Option {
+  // ...
+}
+
+func WithLogger(log *zap.Logger) Option {
+  // ...
+}
+
+// Open creates a connection.
+func Open(
+  addr string,
+  opts ...Option,
+) (*Connection, error) {
+  // ...
+}
+```
+
+</td></tr>
+<tr><td>
+
+キャッシュやロガーはデフォルトを使う場合でも常に指定する必要があります
+
+```go
+db.Open(addr, db.DefaultCache, zap.NewNop())
+db.Open(addr, db.DefaultCache, log)
+db.Open(addr, false /* cache */, zap.NewNop())
+db.Open(addr, false /* cache */, log)
+```
+
+</td><td>
+
+オプションは必要なら提供されます
+
+```go
+db.Open(addr)
+db.Open(addr, db.WithLogger(log))
+db.Open(addr, db.WithCache(false))
+db.Open(
+  addr,
+  db.WithCache(false),
+  db.WithLogger(log),
+)
+```
+
+</td></tr>
+</tbody></table>
+
+私達が紹介する方法は非公開のメソッドを持った `Option` インタフェースを使う方法です。
+指定されたオプションは非公開の `options` 構造体に保持されます。
+
+```go
+type options struct {
+  cache  bool
+  logger *zap.Logger
+}
+
 type Option interface {
   apply(*options)
 }
 
-type optionFunc func(*options)
+type cacheOption bool
 
-func (f optionFunc) apply(o *options) {
-  f(o)
+func (c cacheOption) apply(opts *options) {
+  opts.cache = bool(c)
 }
 
-func WithTimeout(t time.Duration) Option {
-  return optionFunc(func(o *options) {
-    o.timeout = t
-  })
+func WithCache(c bool) Option {
+  return cacheOption(c)
 }
 
-func WithCaching(cache bool) Option {
-  return optionFunc(func(o *options) {
-    o.caching = cache
-  })
+type loggerOption struct {
+  Log *zap.Logger
 }
 
-// Connect creates a connection.
-func Connect(
+func (l loggerOption) apply(opts *options) {
+  opts.logger = l.Log
+}
+
+func WithLogger(log *zap.Logger) Option {
+  return loggerOption{Log: log}
+}
+
+// Open creates a connection.
+func Open(
   addr string,
   opts ...Option,
 ) (*Connection, error) {
   options := options{
-    timeout: defaultTimeout,
-    caching: defaultCaching,
+    cache:  defaultCache,
+    logger: zap.NewNop(),
   }
 
   for _, o := range opts {
@@ -2043,21 +2486,12 @@ func Connect(
 
   // ...
 }
-
-// Options must be provided only if needed.
-
-db.Connect(addr)
-db.Connect(addr, db.WithTimeout(newTimeout))
-db.Connect(addr, db.WithCaching(false))
-db.Connect(
-  addr,
-  db.WithCaching(false),
-  db.WithTimeout(newTimeout),
-)
 ```
 
-</td></tr>
-</tbody></table>
+このパターンを実装するためにクロージャを使っていますが、この方法は開発者により柔軟性をもたせ、デバッグやテストをしやすくなると考えています。
+特に、テストやモックなどで比較する際にクロージャを使うことで比較しやすくなります。
+更に、`options` に他のインタフェースを実装させる事もできます。
+`fmt.Stringer` インタフェースを実装すると、設定を人間にわかりやすく表示させることも可能です。
 
 更に以下の資料が参考になります。
 
