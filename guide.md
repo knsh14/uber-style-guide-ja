@@ -428,7 +428,7 @@ c := make(chan int)
 </tbody></table>
 
 ## Start Enums at One
-Go で enum を導入するときの標準的な方法は、型を定義して `const` のグループを作り、初期値を `itoa` にすることです。
+Go で enum を導入するときの標準的な方法は、型を定義して `const` のグループを作り、初期値を `iota` にすることです。
 変数のデフォルト値はゼロ値です。なので通常はゼロ値ではない値から enum を始めるべきでしょう。
 
 <table>
@@ -486,7 +486,7 @@ const (
 
 1. 1日は24時間である
 2. 1時間は60分である
-3. 1周間は7日である
+3. 1週間は7日である
 4. 1年は365日である
 5. [などなど]( https://infiniteundo.com/post/25326999628/falsehoods-programmers-believe-about-time )
 
