@@ -926,13 +926,11 @@ if err != nil {
 </tbody></table>
 
 ## Use go.uber.org/atomic
-**TODO: もう少し噛み砕く**
 
-`int32`や`int64`などの変数に対してアトミックな操作をするために[sync/atomic]( https://golang.org/pkg/sync/atomic/ )パッケージが使われます。
-ですがこれだとコードの漏れが発生しやすい欠点があります。
+[sync/atomic](https://golang.org/pkg/sync/atomic)パッケージによるアトミック操作は`int32`や`int64`といったの基本的な型を対象としているため、変数に対する読み出し・変更操作にアトミック操作を用いるということを容易に忘却させます。
 
-[go.uber.org/atomic]( https://godoc.org/go.uber.org/atomic )は実際のデータの型を隠すことにより型安全にこれらの操作を実行することができます。
-また、便利な`atomic.Bool`型もあります。
+[go.uber.org/atomic](https://godoc.org/go.uber.org/atomic)は実際のデータの型を基底型として隠蔽することによりこれらのアトミック操作を型安全に実行することができます。
+加えて、便利な`atomic.Bool`型も含まれています。
 
 
 <table>
