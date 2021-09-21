@@ -926,13 +926,11 @@ if err != nil {
 </tbody></table>
 
 ## Use go.uber.org/atomic
-**TODO: もう少し噛み砕く**
 
-`int32`や`int64`などの変数に対してアトミックな操作をするために[sync/atomic]( https://golang.org/pkg/sync/atomic/ )パッケージが使われます。
-ですがこれだとコードの漏れが発生しやすい欠点があります。
+[sync/atomic](https://golang.org/pkg/sync/atomic)パッケージによるアトミック操作は`int32`や`int64`といった基本的な型を対象としているため、アトミックに操作すべき変数に対する読み出し・変更操作にアトミック操作を用いるということ(つまりsync/atomicパッケージの関数を使うこと自体)を容易に忘却させます。例では`int32`の変数に普通の読み出し操作を行ってしまっていますが、これはコンパイラの型チェック機構を素通ししてしまっているため潜在的に競合条件のあるコードをコンパイルできてしまっています。
 
-[go.uber.org/atomic]( https://godoc.org/go.uber.org/atomic )は実際のデータの型を隠すことにより型安全にこれらの操作を実行することができます。
-また、便利な`atomic.Bool`型もあります。
+[go.uber.org/atomic](https://godoc.org/go.uber.org/atomic)は実際のデータの型を基底型として隠蔽することによりこれらのアトミック操作に対して型安全性を付与できます。これによって読み出し操作を行う方法はアトミックな操作に限定され、普通の読み出し操作はコンパイラの型チェックの機構によってコンパイル時にはじくことが可能となります。
+また`sync/atomic`パッケージに加えて便利な`atomic.Bool`型も提供しています。
 
 
 <table>
@@ -942,19 +940,19 @@ if err != nil {
 
 ```go
 type foo struct {
-  running int32  // atomic
+  running int32  // アトミックな操作が必要な変数
 }
 
 func (f* foo) start() {
   if atomic.SwapInt32(&f.running, 1) == 1 {
-     // already running…
+     // すでに実行中
      return
   }
-  // start the Foo
+  // Fooを開始
 }
 
 func (f *foo) isRunning() bool {
-  return f.running == 1  // race!
+  return f.running == 1  // 競合条件! --> 別スレッドから実行されたatomic.SwapInt32による値の更新が見えないことが起こりうる
 }
 ```
 
@@ -967,14 +965,14 @@ type foo struct {
 
 func (f *foo) start() {
   if f.running.Swap(true) {
-     // already running…
+     // すでに実行中
      return
   }
-  // start the Foo
+  // Fooを開始
 }
 
 func (f *foo) isRunning() bool {
-  return f.running.Load()
+  return f.running.Load()  // 読み出し操作がアトミックなため決定論的な振る舞いにになる(実はこの振る舞いはGoのメモリバリア指定がデフォルトSeqCstであることに依存するが、本項では深く触れない)
 }
 ```
 
