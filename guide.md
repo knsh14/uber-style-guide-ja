@@ -604,26 +604,36 @@ type Config struct {
 もしこれらのインタラクションで `time.Time` を使えない場合には、[RFC 3339]( https://tools.ietf.org/html/rfc3339 )フォーマットの `string` 型を使うようにしましょう。
 このフォーマットは[time.UnmarshalText]( https://golang.org/pkg/time/#Time.UnmarshalText )メソッドの中でも使われますし、`time.Parse` や `time.Format` 関数でも [`time.RFC3339`]( https://pkg.go.dev/time?tab=doc#RFC3339 )と組み合わせて使えます。
 
-## Error Types
-エラーを定義する方法には様々な種類があります。
+## Errors
 
-* シンプルな文字列と[`errors.New`]( https://golang.org/pkg/errors/#New )で定義する方法
-* [`fmt.Errorf`]( https://golang.org/pkg/fmt/#Errorf )を使ってフォーマットされた文字列を使う方法
-* Error() メソッドを実装した自前のエラー型を定義する方法
-* ["pkg/errors".Wrap]( https://godoc.org/github.com/pkg/errors#Wrap )を使ってラップする方法
+### Error Types
+エラーを定義する方法にはいくつかの種類があります。
+ユースケースに合った最適なものを選ぶために以下のことを考慮しましょう。
 
-エラーを返す場合、以下のことに注意する必要があります。
+* 呼び出し側は自身でエラーをハンドリングするためにエラーを検知する必要がありますか？
+  その場合、上位のエラー変数または自前の型を定義することで [`errors.Is`] と [`errors.As`] 関数を利用できるようにサポートしなければなりません。
+* エラーメッセージは静的な文字列ですか？またはコンテキストを持つ情報が必要な動的な文字列ですか？
+  前者ならば [`errors.New`] が利用できます。後者ならば [`fmt.Errorf`] または自前のエラー型を利用しなければなりません。
+* 下流のエラーを更に上流に返していますか？もしそうならば[Error Wrappingのセクション](#error-wrapping)を参照してください。
 
-* このエラーは追加情報が必要ないか？もし無いなら、[`errors.New`]( https://golang.org/pkg/errors/#New )で十分です。
-* 利用する側がエラーを検知してハンドリングする必要がありますか？その場合自前で`Error()`メソッドを実装した型を作る必要があります。
-* 下流のエラーを更に上流に返していますか？もしそうなら、[section on error wrapping.]( https://github.com/uber-go/guide/blob/master/style.md#error-wrapping )の章を参考にしてください。
-* これらに当てはまらないなら、[`fmt.Errorf`]( https://golang.org/pkg/fmt/#Errorf )で問題ないでしょう。
+[`errors.Is`]: https://golang.org/pkg/errors/#Is
+[`errors.As`]: https://golang.org/pkg/errors/#As
 
-もし利用側がエラーを検出する必要があり、あなたが[`errors.New`]( https://golang.org/pkg/errors/#New )でシンプルなエラーを返している場合、`var`を使って予めパッケージ変数にしておくのがよいでしょう。
+[`errors.New`]: https://golang.org/pkg/errors/#New
+[`fmt.Errorf`]: https://golang.org/pkg/fmt/#Errorf
 
+| エラーを検知? | エラーメッセージ | アドバイス                          |
+|-----------------|---------------|-----------------------------------|
+| いいえ           | 静的        | [`errors.New`]                      |
+| いいえ           | 動的       | [`fmt.Errorf`]                      |
+| はい             | 静的        | [`errors.New`]を使ったパッケージ変数(`var`で定義) |
+| はい             | 動的       |  自前のエラー型                 |
+
+例えば、静的文字列のエラーならば [`errors.New`] を利用しましょう。
+呼び出し側がエラーを検知しハンドリングする必要がある場合は、そのエラーをパッケージ変数とし`errors.Is`で検知できるようにしましょう。
 
 <table>
-<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<thead><tr><th>No error matching</th><th>Error matching</th></tr></thead>
 <tbody>
 <tr><td>
 
@@ -636,14 +646,9 @@ func Open() error {
 
 // package bar
 
-func use() {
-  if err := foo.Open(); err != nil {
-    if err.Error() == "could not open" {
-      // handle
-    } else {
-      panic("unknown error")
-    }
-  }
+if err := foo.Open(); err != nil {
+  // Can't handle the error.
+  panic("unknown error")
 }
 ```
 
@@ -661,8 +666,8 @@ func Open() error {
 // package bar
 
 if err := foo.Open(); err != nil {
-  if err == foo.ErrCouldNotOpen {
-    // handle
+  if errors.Is(err, foo.ErrCouldNotOpen) {
+    // handle the error
   } else {
     panic("unknown error")
   }
@@ -672,51 +677,54 @@ if err := foo.Open(); err != nil {
 </td></tr>
 </tbody></table>
 
-もし利用側がエラーを検出する必要があり、あなたがエラーに静的な文字列ではなく更に情報を足したい場合、自前の型を定義する必要があります。
+動的文字列のエラーの場合、呼び出し側がエラー検知する必要がないならば [`fmt.Errorf`] を使い、検知する必要があるならば自前の`error`インターフェースを実装する型を使いましょう。
 
 <table>
-<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<thead><tr><th>No error matching</th><th>Error matching</th></tr></thead>
 <tbody>
 <tr><td>
 
 ```go
-func open(file string) error {
+// package foo
+
+func Open(file string) error {
   return fmt.Errorf("file %q not found", file)
 }
 
-func use() {
-  if err := open("testfile.txt"); err != nil {
-    if strings.Contains(err.Error(), "not found") {
-      // handle
-    } else {
-      panic("unknown error")
-    }
-  }
+// package bar
+
+if err := foo.Open("testfile.txt"); err != nil {
+  // Can't handle the error.
+  panic("unknown error")
 }
 ```
 
 </td><td>
 
 ```go
-type errNotFound struct {
-  file string
+// package foo
+
+type NotFoundError struct {
+  File string
 }
 
-func (e errNotFound) Error() string {
-  return fmt.Sprintf("file %q not found", e.file)
+func (e *NotFoundError) Error() string {
+  return fmt.Sprintf("file %q not found", e.File)
 }
 
-func open(file string) error {
-  return errNotFound{file: file}
+func Open(file string) error {
+  return &NotFoundError{File: file}
 }
 
-func use() {
-  if err := open("testfile.txt"); err != nil {
-    if _, ok := err.(errNotFound); ok {
-      // handle
-    } else {
-      panic("unknown error")
-    }
+
+// package bar
+
+if err := foo.Open("testfile.txt"); err != nil {
+  var notFound *NotFoundError
+  if errors.As(err, &notFound) {
+    // handle the error
+  } else {
+    panic("unknown error")
   }
 }
 ```
@@ -724,8 +732,7 @@ func use() {
 </td></tr>
 </tbody></table>
 
-自前のエラー型を公開する場合、それも公開APIの一種です。気をつけましょう。
-代わりにエラー型と一致しているかを判定する関数を公開するほうがよいでしょう。
+自前のエラー型を公開する場合、それもパッケージの公開APIの一部になることに留意しましょう。
 
 ```go
 // package foo
@@ -758,16 +765,23 @@ if err := foo.Open("foo"); err != nil {
 }
 ```
 
-## Error Wrapping
+### Error Wrapping
 エラーを伝搬させるためには以下の3つの方法が主流です。
 
-* 新たに情報を足さない場合、受けたエラーをそのまま返します。
-* [`"github.com/pkg/errors".Wrap`]( https://godoc.org/github.com/pkg/errors#Wrap )を使って情報を足します。エラーメッセージはより多くの情報を持てますし、[`"github.com/pkg/errors".Cause`]( https://godoc.org/github.com/pkg/errors#Cause )を使えば元のエラーを取り出すこともできます。
-* 呼び出し側がエラーをチェックしたりハンドリングする必要がない場合は[fmt.Errorf]( https://golang.org/pkg/fmt/#Errorf )を使いましょう。
+* 受けたエラーをそのまま返す。
+* `fmt.Errorf` に `%w` を付けてコンテキストを追加する。
+* `fmt.Errorf` に `%v` を付けてコンテキストを追加する。
 
-"connection refused"のような曖昧なエラーを返すよりも、"call service foo: connection refused"のようなより役に立つ情報を返しましょう。
+追加するコンテキストが無いならばエラーをそのまま返しましょう。これによりオリジナルのエラー型とメッセージが保たれます。これは下流のエラーメッセージにエラーがどこから来たか追うための十分な情報がある場合に適しています。
 
-返ってきたエラーに情報を足す場合、"failed to"のような表現を省略することでより簡潔になります。
+別の方法として、"connection refused"のような曖昧なエラーではなく、"call service foo: connection refused"のようなより有益なエラーを得られるように、可能な限りエラーメッセージにコンテキストを追加することもできます。
+
+エラーにコンテキストを追加するには`fmt.Errorf`を使いましょう。このとき、呼び出し側がエラー元の原因を抽出し検知できるようにするべきかどうかに基づき`%w`または`%v`を選ぶことになります。
+
+* 呼び出し側が原因のエラー元を把握する必要がある場合は`%w`を使いましょう。これはほとんどのラップされたエラーにとって良いデフォルトの振る舞いになりますが、呼び出し側がそれに依存しだすかもしないことを考慮しましょう。そのため、ラップされたエラーが既知の変数(var)か型(type)であるケースでは、関数の責務としてその振る舞いのコードドキュメント記載とテストをしましょう。
+* 原因のエラー元をあえて曖昧にする場合`%v`を使いましょう。呼び出し側はエラー検知をすることができなくなりますが、将来必要なときに`%w`を使うように変更できます。
+
+返されたエラーにコンテキストを追加する場合、"failed to"のようなエラーがスタックに蓄積されるあたって明白な表現は避け、コンテキストを簡潔に保つようにしてください。
 
 <table>
 <thead><tr><th>Bad</th><th>Good</th></tr></thead>
@@ -778,7 +792,7 @@ if err := foo.Open("foo"); err != nil {
 s, err := store.New()
 if err != nil {
     return fmt.Errorf(
-        "failed to create new store: %s", err)
+        "failed to create new store: %w", err)
 }
 ```
 
@@ -788,11 +802,11 @@ if err != nil {
 s, err := store.New()
 if err != nil {
     return fmt.Errorf(
-        "new store: %s", err)
+        "new store: %w", err)
 }
 ```
 
-<tr><td>
+</td></tr><tr><td>
 
 ```
 failed to x: failed to y: failed to create new store: the error
@@ -807,7 +821,63 @@ x: y: new store: the error
 </td></tr>
 </tbody></table>
 
-ですがエラーメッセージが他のシステムに送られる場合、errタグを付けたりFAILEDプレフィックスをつけたりと、よりエラーメッセージであることを明確にする必要があります。
+しかし、エラーメッセージが他のシステムに送られる場合は"err"タグを付けたり"Failed"プレフィックスをつけたりすることでエラーメッセージであることを明確にする必要があります。
+
+[Don't just check errors, handle them gracefully]の記事も参照してください。
+
+  [Don't just check errors, handle them gracefully]: https://dave.cheney.net/2016/04/27/dont-just-check-errors-handle-them-gracefully
+
+### Error Naming
+
+グローバル変数として使われるエラー値においてそれがパブリックかプライベートかによって`Err`または`err`のプレフィックスを付けましょう。
+この助言は[Prefix Unexported Globals with _](#prefix-unexported-globals-with-_)の助言よりも優先されます。
+
+```go
+var (
+  // 以下の2つのエラーはパブリックであるため
+  // このパッケージの利用者はこれらのエラーを
+  // errors.Isで検知することができる。
+
+  ErrBrokenLink = errors.New("link is broken")
+  ErrCouldNotOpen = errors.New("could not open")
+
+  // このエラーはパッケージのパブリックAPIに
+  // させたくないのでプライベートにしている。
+  // errors.Isでパッケージ内にてこのエラーを
+  // 使うことができる。
+
+  errNotFound = errors.New("not found")
+)
+```
+
+カスタムエラー型の場合、`Error`を末尾に付けるようにしましょう。
+
+```go
+// 同様にこのエラーはパブリックであるため
+// このパッケージの利用者はこれらのエラーを
+// errors.Asで検知することができる。
+
+type NotFoundError struct {
+  File string
+}
+
+func (e *NotFoundError) Error() string {
+  return fmt.Sprintf("file %q not found", e.File)
+}
+
+// このエラーはパッケージのパブリックAPIに
+// させたくないのでプライベートにしている。
+// errors.Asでパッケージ内にてこのエラーを
+// 使うことができる。
+
+type resolveError struct {
+  Path string
+}
+
+func (e *resolveError) Error() string {
+  return fmt.Sprintf("resolve %q", e.Path)
+}
+```
 
 ## Handle Type Assertion Failures
 [型アサーション]( https://golang.org/ref/spec#Type_assertions )で1つの戻り値を受け取る場合、その型でなかったらパニックを起こします。
