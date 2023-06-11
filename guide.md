@@ -879,6 +879,98 @@ func (e *resolveError) Error() string {
 }
 ```
 
+### Handle Errors Once
+呼び出し側が呼び出し先からエラーを受け取ったとき、エラーについてどれほど知っているかで様々な方法があります。
+
+主にこれらですが、他にも色々あります。
+
+- もし、呼び出し先が特定のエラーを定義しているなら、[`errors.Is`]や[`errors.As`]を使って処理を分岐させます。
+- もし復帰可能なエラーなら、エラーをログに出力し、安全に処理を継続しましょう
+- もしドメインで定義された条件を満たさないエラーなら、事前に定義したエラーを返しましょう
+- エラーを返すときは、[Wrap]( #error-wrapping ) するか、一つ一つ忠実に返しましょう。
+
+呼び出し元がどのようにエラーを扱うかに関わらず、通常はどのエラーも一度だけ処理するべきです。例えば、呼び出し元の更に呼び出し元も同様にエラーを処理するので、呼び出し元はエラーをログに記録してから返すべきではありません。
+
+次の具体例を考えます。
+
+<table>
+<thead><tr><th>Description</th><th>Code</th></tr></thead>
+<tbody>
+<tr><td>
+
+**悪い例**: エラーをログに書き出してから返す。
+
+より上位の呼び出し先も同様にエラーをログに出力する可能性があるので、アプリケーションログに多くのノイズが混ざりこのログの価値が薄まります。
+
+</td><td>
+
+```go
+u, err := getUser(id)
+if err != nil {
+  // BAD: See description
+  log.Printf("Could not get user %q: %v", id, err)
+  return err
+}
+```
+
+</td></tr>
+<tr><td>
+
+**良い例**: エラーをラップして返す。
+
+より上位の呼び出し側がエラーを処理します。 `%w` を使うと、[`errors.Is`]や[`errors.As`]を使ってエラーマッチさせることができます。
+
+</td><td>
+
+```go
+u, err := getUser(id)
+if err != nil {
+  return fmt.Errorf("get user %q: %w", id, err)
+}
+```
+
+</td></tr>
+<tr><td>
+
+**良い例**: エラーをログに出力し、処理を継続する。
+
+もしその処理が絶対必要でないなら、品質は下がりますが復旧して処理を続けることができます。
+</td><td>
+
+```go
+if err := emitMetrics(); err != nil {
+  // メトリクスの書き出し失敗は処理を止めるほどではない
+  log.Printf("Could not emit metrics: %v", err)
+}
+
+```
+
+</td></tr>
+<tr><td>
+
+**良い例**: エラーマッチさせて処理を継続する。
+
+もし呼び出し元がエラーを定義していて、そのエラーが復旧可能なら、エラーを確認して処理を継続しましょう。
+その他のエラーだった場合はエラーをラップして返しましょう。
+
+ラップされたエラーは上位の呼び出し元で処理させましょう。
+</td><td>
+
+```go
+tz, err := getUserTimeZone(id)
+if err != nil {
+  if errors.Is(err, ErrUserNotFound) {
+    // もしユーザーがみつからないなら UTC を使う
+    tz = time.UTC
+  } else {
+    return fmt.Errorf("get user %q: %w", id, err)
+  }
+}
+```
+
+</td></tr>
+</tbody></table>
+
 ## Handle Type Assertion Failures
 [型アサーション]( https://golang.org/ref/spec#Type_assertions )で1つの戻り値を受け取る場合、その型でなかったらパニックを起こします。
 型アサーションではその型に変換できたかを示すbool値も同時に返ってくるので、それで事前にチェックしましょう。
@@ -1247,6 +1339,549 @@ func (l *ConcreteList) Remove(e Entity) {
 実装の詳細をそのメソッドが持つことで内部での変更がしやすくなります。
 実装がすぐに見えるので、Listの詳細をさらに見に行く必要がなくなります。
 
+## Avoid Using Built-in Names
+
+Go の[言語仕様]( https://golang.org/ref/spec )ではいくつかのビルトイン、または[定義済み識別子]( https://golang.org/ref/spec#Predeclared_identifiers )があります。これらは Go のプログラム内で識別子として使うべきではありません。
+
+状況にもよりますが、これらの識別子を再利用すると、元の識別子がレキシカルスコープ内で隠蔽されるか、元のコードを混乱させます。
+コンパイラがエラーを出して気づく場合もありますが、最悪の場合は grep などでは発見困難な潜在的バグを起こす可能性があります。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+var error string
+// `error` はビルトインの型を隠す
+
+// or
+
+func handleErrorMessage(error string) {
+    // `error` はビルトインの型を隠す
+}
+```
+
+</td><td>
+
+```go
+var errorMessage string
+// `error` はビルトインの型のまま
+
+// or
+
+func handleErrorMessage(msg string) {
+    // `error` はビルトインの型のまま
+}
+```
+
+</td></tr>
+<tr><td>
+
+```go
+type Foo struct {
+    // これらのフィールドは
+    // 技術的にはシャドウイングを引き起こしませんが、
+    // `error` や `string` という文字列は曖昧です。
+    error  error
+    string string
+}
+
+func (f Foo) Error() error {
+    // `error` と `f.error` は見た目が似ている
+    return f.error
+}
+
+func (f Foo) String() string {
+    // `string` と `f.string` は見た目が似ている
+    return f.string
+}
+```
+
+</td><td>
+
+```go
+type Foo struct {
+    // `error` や `string` という文字列は明確に型名を指します
+    err error
+    str string
+}
+
+func (f Foo) Error() error {
+    return f.err
+}
+
+func (f Foo) String() string {
+    return f.str
+}
+```
+
+</td></tr>
+</tbody></table>
+
+宣言済み識別子名をローカルの識別子に使ってもコンパイラはエラーを出さないことに注意してください。ですが `go vet` などのツールはこれらのシャドウイングを正しく見つけることができます。
+
+## Avoid `init()`
+
+できるなら `init()` を使うのは避けましょう。次のケースの場合は避けようがなかったり、推奨されます。
+
+- 実行環境や呼び出し方に関係なく、決定的である場合
+- 他の `init()` 関数の実行順や副作用に影響されない場合。`init()` の順序はよく知られていますが、コードが変更され、 `init()` 関数間の関係によってはコードが脆弱になり、エラーが発生しやすくなります
+- グローバルな情報や、環境変数、ワーキングディレクトリ、プログラムの引数や入力にアクセスしたり、操作しない場合
+- ファイルシステム、ネットワーク、システムコールの操作をしない場合
+
+コードがこれらの要件を満たせない場合、 `main()` 関数か、プログラムのライフサイクルの一部でヘルパー関数として呼び出すか、`main()` 関数で直接呼び出す必要があります。
+特にライブラリなど他のプログラムで使われることを想定したコードの場合は特に決定的であることに注意し、 "init magic" を引き起こさないように注意しましょう。
+
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+type Foo struct {
+    // ...
+}
+
+var _defaultFoo Foo
+
+func init() {
+    _defaultFoo = Foo{
+        // ...
+    }
+}
+```
+
+</td><td>
+
+```go
+var _defaultFoo = Foo{
+    // ...
+}
+
+// もしくはテスト可能性に配慮してこのようにします
+
+var _defaultFoo = defaultFoo()
+
+func defaultFoo() Foo {
+    return Foo{
+        // ...
+    }
+}
+```
+
+</td></tr>
+<tr><td>
+
+```go
+type Config struct {
+    // ...
+}
+
+var _config Config
+
+func init() {
+    // 悪い例: 現在のディレクトリに依存している
+    cwd, _ := os.Getwd()
+
+    // 悪い例: I/O
+    raw, _ := os.ReadFile(
+        path.Join(cwd, "config", "config.yaml"),
+    )
+
+    yaml.Unmarshal(raw, &_config)
+}
+```
+
+</td><td>
+
+```go
+type Config struct {
+    // ...
+}
+
+func loadConfig() Config {
+    cwd, err := os.Getwd()
+    // handle err
+
+    raw, err := os.ReadFile(
+        path.Join(cwd, "config", "config.yaml"),
+    )
+    // handle err
+
+    var config Config
+    yaml.Unmarshal(raw, &config)
+
+    return config
+}
+```
+
+</td></tr>
+</tbody></table>
+
+これらを考慮すると、次のような状況では `init()` が望ましかったり必要になる可能性があります。
+
+- ただの代入では表現できない複雑な式
+- `database/sql` の登録や、エンコーディングタイプの登録など、プラグイン的に使うフック
+- [Google Cloud Functions]( https://cloud.google.com/functions/docs/bestpractices/tips#use_global_variables_to_reuse_objects_in_future_invocations ) などの決定的事前処理の最適化
+
+## Exit in Main
+
+Go のプログラムでは即時終了するために [`os.Exit`]( https://golang.org/pkg/os/#Exit ) や [`log.Fatal*`]( https://golang.org/pkg/log/#Fatal ) を使います。`panic()` を使うのは良い方法ではありません [don't panic](#dont-panic)を読んでください。
+`os.Exit` や `log.Fatal*` を読んでいいのは `main()` 関数だけです。他の関数ではエラーを返して失敗を通知しましょう。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+func main() {
+  body := readFile(path)
+  fmt.Println(body)
+}
+
+func readFile(path string) string {
+  f, err := os.Open(path)
+  if err != nil {
+    log.Fatal(err)
+  }
+
+  b, err := io.ReadAll(f)
+  if err != nil {
+    log.Fatal(err)
+  }
+
+  return string(b)
+}
+```
+
+</td><td>
+
+```go
+func main() {
+  body, err := readFile(path)
+  if err != nil {
+    log.Fatal(err)
+  }
+  fmt.Println(body)
+}
+
+func readFile(path string) (string, error) {
+  f, err := os.Open(path)
+  if err != nil {
+    return "", err
+  }
+
+  b, err := io.ReadAll(f)
+  if err != nil {
+    return "", err
+  }
+
+  return string(b), nil
+}
+```
+
+</td></tr>
+</tbody></table>
+
+根拠: `exit` する関数が複数あるプログラムにはいくつかの問題があります。
+
+- 明確でない制御フロー: どの関数もプログラムを強制終了できるので、制御フローを推論するのが難しくなります。
+- テストが難しくなる: 強制終了するプログラムはテストで呼び出されたときも終了します。これはその関数をテストするのも難しくなりますし、`go test` でテストされるはずだった他のテストがスキップされる危険もあります。
+- 後処理のスキップ: プログラムが強制終了されたとき、`defer` で終了時に実行する予定だった関数がスキップされます。これは重要な後処理をスキップする危険があります。
+
+### Exit Once
+可能なら、 `os.Exit` か `log.Fatal` を `main()` 関数で **一度だけ** 呼ぶのが好ましいです。もしプログラムを停止する失敗のシナリオがいくつかある場合、そのロジックは別の関数にしてエラーを返しましょう。
+
+こうすると、 `main()` 関数を短くすることができますし、重要なビジネスロジックを分離してテストしやすくすることができます。
+
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+package main
+
+func main() {
+  args := os.Args[1:]
+  if len(args) != 1 {
+    log.Fatal("missing file")
+  }
+  name := args[0]
+
+  f, err := os.Open(name)
+  if err != nil {
+    log.Fatal(err)
+  }
+  defer f.Close()
+
+  // もしここで log.Fatal を呼ぶと、
+  // f.Close は実行されません。
+
+  b, err := io.ReadAll(f)
+  if err != nil {
+    log.Fatal(err)
+  }
+
+  // ...
+}
+```
+
+</td><td>
+
+```go
+package main
+
+func main() {
+  if err := run(); err != nil {
+    log.Fatal(err)
+  }
+}
+
+func run() error {
+  args := os.Args[1:]
+  if len(args) != 1 {
+    return errors.New("missing file")
+  }
+  name := args[0]
+
+  f, err := os.Open(name)
+  if err != nil {
+    return err
+  }
+  defer f.Close()
+
+  b, err := io.ReadAll(f)
+  if err != nil {
+    return err
+  }
+
+  // ...
+}
+```
+
+</td></tr>
+</tbody></table>
+
+## Use field tags in marshaled structs
+JSON や YAML あるいは他のタグを使ったフィールド名をサポートするフォーマットに変換する場合、関連するタグを使ってアノテーションをつけましょう。
+
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+type Stock struct {
+  Price int
+  Name  string
+}
+
+bytes, err := json.Marshal(Stock{
+  Price: 137,
+  Name:  "UBER",
+})
+```
+
+</td><td>
+
+```go
+type Stock struct {
+  Price int    `json:"price"`
+  Name  string `json:"name"`
+  // 安全に Name フィールドを name に変換できる
+}
+
+bytes, err := json.Marshal(Stock{
+  Price: 137,
+  Name:  "UBER",
+})
+```
+
+</td></tr>
+</tbody></table>
+
+根拠: 構造体をシリアライズした形式は異なるシステムをつなぐ約束事です。
+フィールド名を含む構造体のシリアライズした形式が変わってしまうと、この約束事が破れてしまいます。
+タグを使ってフィールド名を指定するとこの約束事がより厳密になり、リファクタリングやフィールドのリネームで不意に壊れてしまうことを防ぐことができます。
+
+## Don't fire-and-forget goroutines
+
+ゴルーチンは軽量ですが、コストはかかります。少なくとも、スタックのメモリとスケジュールされたCPUを使います。
+典型的な使い方をする限りコストは小さいですが、ライフタイムを考えずに大量に作り出すと大きなパフォーマンス問題を引き起こします。
+ライフタイムが管理されてないゴルーチンは、ガベージコレクションの邪魔になったり、使用されなくなったリソースを保持し続けるなどの問題も引き起こす可能性があります。
+
+なので、絶対に本番コードでゴルーチンをリークさせないようにしましょう。 [go.uber.org/goleak]( https://pkg.go.dev/go.uber.org/goleak ) でゴルーチンを使うところでリークさせてないかテストしましょう。
+
+一般的に、全てのゴルーチンはどちらかの方法を持っている必要があります。
+
+- 停止する時間が予測できる
+- 停止すべきゴルーチンに通知する方法がある
+
+どちらのケースでも、処理をブロックしてゴルーチンの終了を待つコードも無ければいけません。
+
+
+例:
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+go func() {
+  for {
+    flush()
+    time.Sleep(delay)
+  }
+}()
+```
+
+</td><td>
+
+```go
+var (
+  stop = make(chan struct{}) // ゴルーチンに停止を伝える
+  done = make(chan struct{}) // ゴルーチンが停止したことを伝える
+)
+go func() {
+  defer close(done)
+
+  ticker := time.NewTicker(delay)
+  defer ticker.Stop()
+  for {
+    select {
+    case <-ticker.C:
+      flush()
+    case <-stop:
+      return
+    }
+  }
+}()
+
+// Elsewhere...
+close(stop)  // ゴルーチンに停止シグナルを送る
+<-done       // そしてゴルーチンが止まるのを待つ
+```
+
+</td></tr>
+<tr><td>
+
+ゴルーチンを止める方法は無い。プログラムが終了するまで残り続ける
+
+</td><td>
+
+ゴルーチンは `close(stop)` で停止できる。そして `<-done` で待つこともできる。
+
+</td></tr>
+</tbody></table>
+
+### Wait for goroutines to exit
+
+システムによって起動されたゴルーチンが与えられた場合、ゴルーチンの終了を待つ方法を用意する必要があります。次の2つがよく使われる方法です。
+
+* `sync.WaitGroup` を使います。終了を待つべきゴルーチンが複数ある場合、こちらを使う
+
+```go
+var wg sync.WaitGroup
+for i := 0; i < N; i++ {
+  wg.Add(1)
+  go func() {
+    defer wg.Done()
+    // ...
+  }()
+}
+
+// 全ての終了を待つ
+wg.Wait()
+```
+
+* 別の `chan struct{}` を作り、ゴルーチンが終了したとき `close` します。待つべきゴルーチンが1つだけのときはこちらを使いましょう
+
+```go
+done := make(chan struct{})
+go func() {
+  defer close(done)
+  // ...
+}()
+
+// ここでゴルーチンの終了を待つ
+<-done
+```
+
+### No goroutines in `init()`
+
+`init()` 関数ではゴルーチンを起動するのを避けましょう。 [Avoid init](#avoid-init) も参照してください。
+
+もしパッケージがバックグラウンドで動くゴルーチンを作る必要があるなら、ゴルーチンのライフタイムを管理するオブジェクトを作りそれを公開しましょう。
+そのオブジェクトは `Close`、`Stop`、`Shutdown` など、バックグラウンドのゴルーチンを停止し、その終了を待つメソッドを提供しましょう。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+func init() {
+  go doWork()
+}
+
+func doWork() {
+  for {
+    // ...
+  }
+}
+```
+
+</td><td>
+
+```go
+type Worker struct{ /* ... */ }
+
+func NewWorker(...) *Worker {
+  w := &Worker{
+    stop: make(chan struct{}),
+    done: make(chan struct{}),
+    // ...
+  }
+  go w.doWork()
+}
+
+func (w *Worker) doWork() {
+  defer close(w.done)
+  for {
+    // ...
+    case <-w.stop:
+      return
+  }
+}
+
+// Shutdown はワーカーに終了を伝え、
+// ワーカーが終了するのを待ちます。
+func (w *Worker) Shutdown() {
+  close(w.stop)
+  <-w.done
+}
+```
+
+</td></tr>
+<tr><td>
+
+ユーザーがこのパッケージを公開すると、ゴルーチンを無条件に作成し、止める方法はありません。
+
+</td><td>
+
+ユーザーがリクエストすると、ワーカーを起動します。`Shutdown` メソッドで、ワーカーを停止し使っているリソースを開放できる手段も提供しています。
+
+[Wait for goroutines to exit]( #wait-for-gorutines-to-exit ) でも話したように、ワーカーが複数ゴルーチンを使う場合は `WaitGroup` を使いましょう。
+
+</td></tr>
+</tbody></table>
+
 
 # Performance
 パフォーマンスガイドラインは特によく実行される箇所にのみ適用されます。
@@ -1379,6 +2014,12 @@ for _, f := range files {
 </tbody></table>
 
 # Style
+
+## Avoid overly long lines
+横にスクロールしたり、たくさん首をふるような長過ぎるコードは避けましょう。
+
+横幅は99文字を推奨しています。書く側はこれを超えると改行したほうが良いですが、絶対ではありません。
+コードが超えても問題ありません。
 
 ## Be Consistent
 このガイドラインの一部は客観的に評価することができます。
@@ -1845,7 +2486,8 @@ const (
 </tbody></table>
 
 ## Embedding in Structs
-mutexなど埋め込まれた型は構造体の定義の最初に置くべきです。
+
+埋め込まれた型は構造体の定義の最初に置くべきです。
 また、通常のフィールドと区別するために1行開ける必要があります。
 
 <table>
@@ -1873,10 +2515,28 @@ type Client struct {
 </td></tr>
 </tbody></table>
 
-## Use Field Names to Initialize Structs
+埋め込みは適切な方法で機能を追加、拡張できる具体的なメリットがある場合に使いましょう。
+ユーザーに悪影響を与えずに行う必要があります。[Avoid Embedding Types in Public Structs]( #avoid-embedding-types-in-public-structs ) も参照しましょう。
 
-構造体を初期化する際にはフィールド名を書くようにしましょう。
-[`go vet`]( https://golang.org/cmd/vet/ )でこのルールは指摘されます。
+例外: Mutex は埋め込むべきではありません。公開されないフィールドとして使いましょう。[Zero-value Mutexes are Valid]( #zero-value-mutexes-are-valid ) も参照しましょう。
+
+埋め込みは次のことをすべきではありません。:
+
+- 見た目や、手軽さを重視して使うこと
+- 埋め込まれた型が使いにくくなること
+- 埋め込まれた型のゼロ値に影響すること。もし埋め込まれた型が便利なゼロ値を持っているなら、埋め込まれた後にもそれが維持されるようにしなければいけません。
+- 埋め込まれた副作用として関係ないメソッドやフィールドが公開されてしまうこと
+- 公開してない型を公開してしまうこと
+- 埋め込まれた型のコピーに影響が出ること
+- 埋め込まれた型の API や、意味上の型が変わってしまうこと
+- 非標準の形式で埋め込むこと
+- 埋め込まれる型の実装の詳細を公開すること
+- 型の内部を操作できるようにすること
+- ユーザーが意図しない方法で内部関数の挙動を変えること
+
+簡単にまとめると、きちんと意識して埋め込みましょうということになります。
+使うべきかチェックする簡単な方法は、「埋め込みたい型の公開されているメソッドやフィールドは全て埋め込まれる型に直接追加する必要があるか？」です。
+答えが、「いくつかはある」あるいは「ない」の場合は埋め込みは使わず、フィールドを使いましょう。
 
 <table>
 <thead><tr><th>Bad</th><th>Good</th></tr></thead>
@@ -1884,33 +2544,100 @@ type Client struct {
 <tr><td>
 
 ```go
-k := User{"John", "Doe", true}
+type A struct {
+    // 悪い例:
+    // A.Lock() と A.Unlock() が
+    // 使えますが、メリットはありません。
+    // さらに、A の内部を操作できる
+    // ようになってしまいます。
+    sync.Mutex
+}
 ```
 
 </td><td>
 
 ```go
-k := User{
-    FirstName: "John",
-    LastName: "Doe",
-    Admin: true,
+type countingWriteCloser struct {
+    // 良い例:
+    // Write() は特定の目的のために
+    // 外側のレイヤーに提供されます。
+    // そして、内部の型の Write() メソッドに
+    // 役割を移譲しています。
+    io.WriteCloser
+
+    count int
+}
+
+func (w *countingWriteCloser) Write(bs []byte) (int, error) {
+    w.count += len(bs)
+    return w.WriteCloser.Write(bs)
+}
+```
+
+</td></tr>
+<tr><td>
+
+```go
+type Book struct {
+    // 悪い例:
+    // ポインタなのでゼロ値の便利さを消してしまう
+    io.ReadWriter
+
+    // other fields
+}
+
+// later
+
+var b Book
+b.Read(...)  // panic: nil pointer
+b.String()   // panic: nil pointer
+b.Write(...) // panic: nil pointer
+```
+
+</td><td>
+
+```go
+type Book struct {
+    // 良い例:
+    // 便利なゼロ値を持っている
+    bytes.Buffer
+
+    // other fields
+}
+
+// later
+
+var b Book
+b.Read(...)  // ok
+b.String()   // ok
+b.Write(...) // ok
+```
+
+</td></tr>
+<tr><td>
+
+```go
+type Client struct {
+    sync.Mutex
+    sync.WaitGroup
+    bytes.Buffer
+    url.URL
+}
+```
+
+</td><td>
+
+```go
+type Client struct {
+    mtx sync.Mutex
+    wg  sync.WaitGroup
+    buf bytes.Buffer
+    url url.URL
 }
 ```
 
 </td></tr>
 </tbody></table>
-
-例外としてフィールド数が3以下のテストケースなら省略してもよいです。
-
-```go
-tests := []struct{
-  op Operation
-  want string
-}{
-  {Add, "add"},
-  {Subtract, "subtract"},
-}
-```
 
 ## Local Variable Declarations
 変数が明示的に設定される場合、`:=` 演算子を利用しましょう。
@@ -2188,7 +2915,106 @@ wantError := `unknown error:"test"`
 </td></tr>
 </tbody></table>
 
-## Initializing Struct References
+## Initializing Structs
+
+### Use Field Names to Initialize Structs
+
+構造体を初期化する際にはフィールド名を書くようにしましょう。
+[`go vet`]( https://golang.org/cmd/vet/ )でこのルールは指摘されます。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+k := User{"John", "Doe", true}
+```
+
+</td><td>
+
+```go
+k := User{
+    FirstName: "John",
+    LastName: "Doe",
+    Admin: true,
+}
+```
+
+</td></tr>
+</tbody></table>
+
+例外としてフィールド数が3以下のテストケースなら省略してもよいです。
+
+```go
+tests := []struct{
+  op Operation
+  want string
+}{
+  {Add, "add"},
+  {Subtract, "subtract"},
+}
+```
+
+### Omit Zero Value Fields in Structs
+フィールド名を使って構造体を初期化するときは、意味のあるコンテキストを提供しない場合はフィールド名を省略しましょう。Goが自動的に型に応じたゼロ値を設定してくれます
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+user := User{
+  FirstName: "John",
+  LastName: "Doe",
+  MiddleName: "",
+  Admin: false,
+}
+```
+
+</td><td>
+
+```go
+user := User{
+  FirstName: "John",
+  LastName: "Doe",
+}
+```
+
+</td></tr>
+</tbody></table>
+
+省略されたフィールドはデフォルトのゼロ値持つことは読み手の負荷を下げることができます。デフォルト値ではない値だけが指定されているからです。
+
+ゼロ値をあえてセットする意味がある場合もあります。例えば、[Test Tables]( #test-tables ) で指定するテストケースではゼロ値でも設定することは役に立ちます。
+
+### Use `var` for Zero Value Structs
+
+全てのフィールドを省略して宣言するときは、 `var` を使って構造体の宣言をしましょう。
+
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+user := User{}
+```
+
+</td><td>
+
+```go
+var user User
+```
+
+</td></tr>
+</tbody></table>
+
+[map initialization]( #initializing-maps )でも似たようなことをしていますが、この方法を使うと、ゼロ値だけの構造体の宣言と、フィールドに値を指定する宣言を区別することができます。そしてこの方法は[declare empty slices]( #declaring-empty-slices )と同じ理由でおすすめの方法です。
+
+### Initializing Struct References
 構造体の初期化と同じように構造体のポインタを初期化するときは`new(T)`ではなく、`&T{}`を使いましょう。
 
 <table>
@@ -2425,6 +3251,147 @@ for _, tt := range tests {
 }
 ```
 
+## Avoid Unnecessary Complexity in Table Tests
+テーブルテストで実施するテストの中で条件付きのアサーションや分岐ロジックがあると、可読性が低くなり保守がとても難しくなります。
+テーブルテストでは `for` の中で、複雑なコードや条件分岐を入れるべきではありません。
+
+テストが失敗してデバッグする必要があるとき、大きくて複雑なテーブルテストは可読性と保守性を大きく損ないます。
+
+そのようなテーブルテストはいくつかのテーブルテストに分割するか、そもそも別のテスト関数に分けるのも良いでしょう。
+
+いくつかの方針を紹介します。
+
+- 振る舞いが小さくなるように意識する
+- 条件付きのアサーションを避けて、テストの深さを最小にする
+- テーブルのフィールドが全てのテストで使われているか確認する
+- 全てのロジックが全てのテストケースで実行されるか確認する
+
+ここでいう「テストの深さ」とは、「そのテストで、前のアサーションを保持する必要がある連続したアサーションの数」といえます。
+循環複雑度に近いです。より薄いテストはよりアサーション間の関係が薄く、より重要な点はそれらのアサーションは条件付きになる可能性が低くなることです。
+
+具体的に言うと、次のような状況だとテストを読むのが難しくなります。
+
+- テーブルのフィールドによって条件分岐が複数ある。( `shouldError` や `expectCall` などのフィールドがあると注意です )
+- 特定のモックの期待値のためにたくさんの `if` がある。( `shouldCallFoo` などのフィールドがあると怪しいです )
+- テーブルの中に関数がある。(フィールドの中に `setupMocks func(*FooMock)` がある )
+
+しかし、変更された入力に基づいてのみ変化する動作をテストする場合、比較可能なユニットを別々のテストに分割して比較しにくくするのではなく、すべての入力に対してどのように動作が変化するかをよりよく説明するために、同様のケースをまとめてテーブルテストとすることが望ましい場合があります。
+
+テスト本体が短くてわかりやすければ、成功ケースと失敗ケースの分岐経路を1つにして、`shouldErr` のようなフィールドでエラーを期待することもできます。
+
+<table>
+<thead><tr><th>Bad</th><th>Good</th></tr></thead>
+<tbody>
+<tr><td>
+
+```go
+func TestComplicatedTable(t *testing.T) {
+  tests := []struct {
+    give          string
+    want          string
+    wantErr       error
+    shouldCallX   bool
+    shouldCallY   bool
+    giveXResponse string
+    giveXErr      error
+    giveYResponse string
+    giveYErr      error
+  }{
+    // ...
+  }
+
+  for _, tt := range tests {
+    t.Run(tt.give, func(t *testing.T) {
+      // setup mocks
+      ctrl := gomock.NewController(t)
+      xMock := xmock.NewMockX(ctrl)
+      if tt.shouldCallX {
+        xMock.EXPECT().Call().Return(
+          tt.giveXResponse, tt.giveXErr,
+        )
+      }
+      yMock := ymock.NewMockY(ctrl)
+      if tt.shouldCallY {
+        yMock.EXPECT().Call().Return(
+          tt.giveYResponse, tt.giveYErr,
+        )
+      }
+
+      got, err := DoComplexThing(tt.give, xMock, yMock)
+
+      // verify results
+      if tt.wantErr != nil {
+        require.EqualError(t, err, tt.wantErr)
+        return
+      }
+      require.NoError(t, err)
+      assert.Equal(t, want, got)
+    })
+  }
+}
+```
+
+</td><td>
+
+```go
+func TestShouldCallX(t *testing.T) {
+  // setup mocks
+  ctrl := gomock.NewController(t)
+  xMock := xmock.NewMockX(ctrl)
+  xMock.EXPECT().Call().Return("XResponse", nil)
+
+  yMock := ymock.NewMockY(ctrl)
+
+  got, err := DoComplexThing("inputX", xMock, yMock)
+
+  require.NoError(t, err)
+  assert.Equal(t, "want", got)
+}
+
+func TestShouldCallYAndFail(t *testing.T) {
+  // setup mocks
+  ctrl := gomock.NewController(t)
+  xMock := xmock.NewMockX(ctrl)
+
+  yMock := ymock.NewMockY(ctrl)
+  yMock.EXPECT().Call().Return("YResponse", nil)
+
+  _, err := DoComplexThing("inputY", xMock, yMock)
+  assert.EqualError(t, err, "Y failed")
+}
+```
+
+</td></tr>
+</tbody></table>
+
+このコードの複雑さは変更したり、理解したり、このテストが正しいのかを証明するのが困難になります。
+
+厳密なガイドラインはありませんが、システムへの複数の入力がある場合は、可読性と保守性を常に考慮して、個別のテストかテーブルテストか決定しましょう。
+
+### Parallel Tests
+
+並列テストなどの特殊なループ(例えば、ループの一部としてゴルーチンを起動し参照を保持するもの)では、ループのスコープ内の変数が正しい値を保持しているか注意しましょう。
+
+```go
+tests := []struct{
+  give string
+  // ...
+}{
+  // ...
+}
+
+for _, tt := range tests {
+  tt := tt // for t.Parallel
+  t.Run(tt.give, func(t *testing.T) {
+    t.Parallel()
+    // ...
+  })
+}
+```
+
+この例では、 `t.Parallel()` を下で読んでいるので、 `tt` という変数をループの中で再度宣言する必要があります。
+もしやらないと、ほとんどのテストで `tt` 変数が期待しない値になったり、テスト中に値が変更されてしまいます。
+
 ## Functional Options
 Functional Option パターンは不透明なOption型を使って内部の構造体に情報を渡すパターンです。
 可変長引数を受け取り、それらを順に内部のオプションに渡します。
@@ -2566,3 +3533,23 @@ func Open(
 
 * [Self-referential functions and the design of options]( https://commandcenter.blogspot.com/2014/01/self-referential-functions-and-design.html )
 * [Functional options for friendly APIs]( https://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis )
+
+
+# Linting
+どんなおすすめの linter のセットよりも重要なのは、コードベース全体で一貫した linter を使うことです。
+
+私達は最小限の linter として以下のものをおすすめしています。これだけあれば、一般的な問題を発見でき、不必要に厳しすぎることもなく、良い品質を確立することができるからです。
+
+- [errcheck]( https://github.com/kisielk/errcheck ) はエラーが正しく処理されているかを担保します
+- [goimports]( https://godoc.org/golang.org/x/tools/cmd/goimports ) はライブラリのインポートの管理もするフォーマッタです
+- [golint]( https://github.com/golang/lint ) は一般的なスタイルのミスを見つけます
+- [govet]( https://golang.org/cmd/vet/ ) は一般的なミスを見つけます
+- [staticcheck]( https://staticcheck.io/ ) は多くの静的チェックを行います
+
+## Lint Runners
+
+私達は、大きなコードベースでのパフォーマンスと、多くの linter を一度に設定できる点から、[golangci-lint]( https://github.com/golangci/golangci-lint ) をおすすめしています。
+このガイドのリポジトリにはおすすめの [.golangci.yaml]( https://github.com/uber-go/guide/blob/master/.golangci.yml ) 設定ファイルがあります。
+
+golangci-lint は[多くのlinter]( https://golangci-lint.run/usage/linters/ )が使えます。前述した linter は基本のセットですが、チームが必要に応じて linter を追加することを推奨しています。
+
